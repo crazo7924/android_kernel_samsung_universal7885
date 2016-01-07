@@ -2241,11 +2241,6 @@ static void _rtl8152_set_rx_mode(struct net_device *netdev)
 	__le32 tmp[2];
 	u32 ocp_data;
 
-	clear_bit(RTL8152_SET_RX_MODE, &tp->flags);
-
-	if (!netif_carrier_ok(netdev))
-		return;
-
 	netif_stop_queue(netdev);
 	ocp_data = ocp_read_dword(tp, MCU_TYPE_PLA, PLA_RCR);
 	ocp_data &= ~RCR_ACPT_ALL;
@@ -2947,18 +2942,10 @@ static void rtl_runtime_suspend_enable(struct r8152 *tp, bool enable)
 
 static void rtl8153_runtime_enable(struct r8152 *tp, bool enable)
 {
-	rtl_runtime_suspend_enable(tp, enable);
-	tp->rtl_ops.u1u2_enable(tp, !enable);
-	tp->rtl_ops.u2p3_enable(tp, !enable);
-}
+	u16 data;
+	int i;
 
-static void rtl8153b_runtime_enable(struct r8152 *tp, bool enable)
-{
-	r8153b_queue_wake(tp, enable);
-	rtl_runtime_suspend_enable(tp, enable);
-	tp->rtl_ops.u1u2_enable(tp, !enable);
-	r8153b_ups_en(tp, enable);
-}
+	data = r8152_mdio_read(tp, MII_BMCR);
 
 #if !defined(CONFIG_MII) && !defined(CONFIG_MII_MODULE)
 int mii_nway_restart (struct mii_if_info *mii)
@@ -5429,18 +5416,7 @@ static int rtl8152_set_speed(struct r8152 *tp, u8 autoneg, u16 speed, u8 duplex)
 	r8152_mdio_write(tp, MII_ADVERTISE, anar);
 	r8152_mdio_write(tp, MII_BMCR, bmcr);
 
-	switch (tp->version) {
-	case RTL_VER_08:
-	case RTL_VER_09:
-		r8153b_ups_flags_w0w1(tp, ups_flags_speed(speed_duplex),
-				      UPS_FLAGS_SPEED_MASK);
-		break;
-
-	default:
-		break;
-	}
-
-	if (bmcr & BMCR_RESET) {
+	if (test_and_clear_bit(PHY_RESET, &tp->flags)) {
 		int i;
 
 		for (i = 0; i < 50; i++) {
@@ -5582,13 +5558,16 @@ static inline void __rtl_work_func(struct r8152 *tp)
 	if (test_and_clear_bit(RTL8152_LINK_CHG, &tp->flags))
 		set_carrier(tp);
 
-	if (test_bit(RTL8152_SET_RX_MODE, &tp->flags))
+	if (test_and_clear_bit(RTL8152_SET_RX_MODE, &tp->flags))
 		_rtl8152_set_rx_mode(tp->netdev);
 
 	/* don't schedule napi before linking */
 	if (test_and_clear_bit(SCHEDULE_NAPI, &tp->flags) &&
 	    netif_carrier_ok(tp->netdev))
 		napi_schedule(&tp->napi);
+
+	if (test_and_clear_bit(PHY_RESET, &tp->flags))
+		rtl_phy_reset(tp);
 
 	mutex_unlock(&tp->control);
 
