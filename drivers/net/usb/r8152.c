@@ -29,9 +29,11 @@
 
 #include "compatibility.h"
 
-/* Version Information */
-#define DRIVER_VERSION "v2.08.0 (2016/12/09)"
-#define DRIVER_AUTHOR "Realtek nic sw <nic_swsd@realtek.com>"
+/* Information for net */
+#define NET_VERSION		"3"
+
+#define DRIVER_VERSION		"v1." NETNEXT_VERSION "." NET_VERSION
+#define DRIVER_AUTHOR "Realtek linux nic maintainers <nic_swsd@realtek.com>"
 #define DRIVER_DESC "Realtek RTL8152/RTL8153 Based USB Ethernet Adapters"
 #define MODULENAME "r8152"
 
@@ -707,11 +709,8 @@ struct r8152 {
 	struct delayed_work schedule, hw_phy_work;
 	struct mii_if_info mii;
 	struct mutex control;	/* use for hw setting */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 0, 0)
-	struct vlan_group *vlgrp;
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 22)
-	struct net_device_stats stats;
+#ifdef CONFIG_PM_SLEEP
+	struct notifier_block pm_notifier;
 #endif
 
 	struct rtl_ops {
@@ -5597,70 +5596,32 @@ out1:
 	usb_autopm_put_interface(tp->intf);
 }
 
-static inline void __rtl_hw_phy_work_func(struct r8152 *tp)
+#ifdef CONFIG_PM_SLEEP
+static int rtl_notifier(struct notifier_block *nb, unsigned long action,
+			void *data)
 {
-	if (test_bit(RTL8152_UNPLUG, &tp->flags))
-		return;
+	struct r8152 *tp = container_of(nb, struct r8152, pm_notifier);
 
-	if (usb_autopm_get_interface(tp->intf) < 0)
-		return;
+	switch (action) {
+	case PM_HIBERNATION_PREPARE:
+	case PM_SUSPEND_PREPARE:
+		usb_autopm_get_interface(tp->intf);
+		break;
 
-	mutex_lock(&tp->control);
+	case PM_POST_HIBERNATION:
+	case PM_POST_SUSPEND:
+		usb_autopm_put_interface(tp->intf);
+		break;
 
-	tp->rtl_ops.hw_phy_cfg(tp);
+	case PM_POST_RESTORE:
+	case PM_RESTORE_PREPARE:
+	default:
+		break;
+	}
 
-	rtl8152_set_speed(tp, tp->autoneg, tp->speed, tp->duplex);
-
-	mutex_unlock(&tp->control);
-
-	usb_autopm_put_interface(tp->intf);
+	return NOTIFY_DONE;
 }
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
-
-static void rtl_work_func_t(void *data)
-{
-	struct r8152 *tp = (struct r8152 *)data;
-
-	__rtl_work_func(tp);
-}
-
-static void rtl_hw_phy_work_func_t(void *data)
-{
-	struct r8152 *tp = (struct r8152 *)data;
-
-	__rtl_hw_phy_work_func(tp);
-}
-
-#else
-
-static void rtl_work_func_t(struct work_struct *work)
-{
-	struct r8152 *tp = container_of(work, struct r8152, schedule.work);
-
-	__rtl_work_func(tp);
-}
-
-static void rtl_hw_phy_work_func_t(struct work_struct *work)
-{
-	struct r8152 *tp = container_of(work, struct r8152, hw_phy_work.work);
-
-	__rtl_hw_phy_work_func(tp);
-}
-
 #endif
-
-static int rtk_disable_diag(struct r8152 *tp)
-{
-	tp->rtk_enable_diag--;
-	ocp_write_word(tp, MCU_TYPE_PLA, PLA_OCP_GPHY_BASE, tp->ocp_base);
-	netif_info(tp, drv, tp->netdev, "disable rtk diag %d\n",
-		   tp->rtk_enable_diag);
-	mutex_unlock(&tp->control);
-	usb_autopm_put_interface(tp->intf);
-
-	return 0;
-}
 
 static int rtl8152_open(struct net_device *netdev)
 {
@@ -5703,6 +5664,10 @@ static int rtl8152_open(struct net_device *netdev)
 	mutex_unlock(&tp->control);
 
 	usb_autopm_put_interface(tp->intf);
+#ifdef CONFIG_PM_SLEEP
+	tp->pm_notifier.notifier_call = rtl_notifier;
+	register_pm_notifier(&tp->pm_notifier);
+#endif
 
 out:
 	pr_info("%s : end of function!\n", __func__);
@@ -5715,6 +5680,10 @@ static int rtl8152_close(struct net_device *netdev)
 	int res = 0;
 	int timeleft = -1;
 
+#ifdef CONFIG_PM_SLEEP
+	unregister_pm_notifier(&tp->pm_notifier);
+#endif
+	napi_disable(&tp->napi);
 	clear_bit(WORK_ENABLE, &tp->flags);
 	usb_kill_urb(tp->intr_urb);
 	cancel_delayed_work_sync(&tp->schedule);
