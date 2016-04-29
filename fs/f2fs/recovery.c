@@ -65,50 +65,29 @@ static struct fsync_inode_entry *get_fsync_inode(struct list_head *head,
 	return NULL;
 }
 
-static struct fsync_inode_entry *add_fsync_inode(struct f2fs_sb_info *sbi,
-			struct list_head *head, nid_t ino, bool quota_inode)
+static struct fsync_inode_entry *add_fsync_inode(struct list_head *head,
+							struct inode *inode)
 {
-	struct inode *inode;
 	struct fsync_inode_entry *entry;
-	int err;
 
-	inode = f2fs_iget_retry(sbi->sb, ino);
-	if (IS_ERR(inode))
-		return ERR_CAST(inode);
+	entry = kmem_cache_alloc(fsync_entry_slab, GFP_F2FS_ZERO);
+	if (!entry)
+		return NULL;
 
-	err = dquot_initialize(inode);
-	if (err)
-		goto err_out;
-
-	if (quota_inode) {
-		err = dquot_alloc_inode(inode);
-		if (err)
-			goto err_out;
-	}
-
-	entry = f2fs_kmem_cache_alloc(fsync_entry_slab, GFP_F2FS_ZERO);
 	entry->inode = inode;
 	list_add_tail(&entry->list, head);
 
 	return entry;
-err_out:
-	iput(inode);
-	return ERR_PTR(err);
 }
 
-static void del_fsync_inode(struct fsync_inode_entry *entry, int drop)
+static void del_fsync_inode(struct fsync_inode_entry *entry)
 {
-	if (drop) {
-		/* inode should not be recovered, drop it */
-		f2fs_inode_synced(entry->inode);
-	}
 	iput(entry->inode);
 	list_del(&entry->list);
 	kmem_cache_free(fsync_entry_slab, entry);
 }
 
-static int recover_dentry(struct inode *inode, struct page *ipage,
-						struct list_head *dir_list)
+static int recover_dentry(struct inode *inode, struct page *ipage)
 {
 	struct f2fs_inode *raw_inode = F2FS_INODE(ipage);
 	nid_t pino = le32_to_cpu(raw_inode->i_pino);
@@ -294,6 +273,7 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
 				bool check_only)
 {
 	struct curseg_info *curseg;
+	struct inode *inode;
 	struct page *page = NULL;
 	block_t blkaddr;
 	unsigned int loop_cnt = 0;
@@ -339,14 +319,21 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
 			 * CP | dnode(F) | inode(DF)
 			 * For this case, we should not give up now.
 			 */
-			entry = add_fsync_inode(sbi, head, ino_of_node(page),
-								quota_inode);
-			if (IS_ERR(entry)) {
-				err = PTR_ERR(entry);
+			inode = f2fs_iget(sbi->sb, ino_of_node(page));
+			if (IS_ERR(inode)) {
+				err = PTR_ERR(inode);
 				if (err == -ENOENT) {
 					err = 0;
 					goto next;
 				}
+				break;
+			}
+
+			/* add this fsync inode to the list */
+			entry = add_fsync_inode(head, inode);
+			if (!entry) {
+				err = -ENOMEM;
+				iput(inode);
 				break;
 			}
 		}
@@ -381,7 +368,7 @@ static void destroy_fsync_dnodes(struct list_head *head, int drop)
 	struct fsync_inode_entry *entry, *tmp;
 
 	list_for_each_entry_safe(entry, tmp, head, list)
-		del_fsync_inode(entry, drop);
+		del_fsync_inode(entry);
 }
 
 static int check_index_in_prev_nodes(struct f2fs_sb_info *sbi,
@@ -674,7 +661,7 @@ static int recover_data(struct f2fs_sb_info *sbi, struct list_head *head)
 		}
 
 		if (entry->blkaddr == blkaddr)
-			list_move_tail(&entry->list, tmp_inode_list);
+			del_fsync_inode(entry);
 next:
 		/* check next segment */
 		blkaddr = next_blkaddr_of_node(page);
