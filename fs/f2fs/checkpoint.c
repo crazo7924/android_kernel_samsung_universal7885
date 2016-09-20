@@ -1313,10 +1313,6 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	__u32 crc32 = 0;
 	int i;
 	int cp_payload_blks = __cp_payload(sbi);
-	struct super_block *sb = sbi->sb;
-	struct curseg_info *seg_i = CURSEG_I(sbi, CURSEG_HOT_NODE);
-	u64 kbytes_written;
-	int err;
 
 	/* Flush all the NAT/SIT pages */
 	while (get_pages(sbi, F2FS_DIRTY_META)) {
@@ -1372,6 +1368,9 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 
 	/* update ckpt flag for checkpoint */
 	update_ckpt_flags(sbi, cpc);
+
+	/* set this flag to activate crc|cp_ver for recovery */
+	set_ckpt_flags(ckpt, CP_CRC_RECOVERY_FLAG);
 
 	/* update SIT/NAT bitmap */
 	get_sit_bitmap(sbi, __bitmap_ptr(sbi, SIT_BITMAP));
@@ -1452,15 +1451,7 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	commit_checkpoint(sbi, ckpt, start_blk);
 	f2fs_wait_on_all_pages_writeback(sbi);
 
-	/*
-	 * invalidate intermediate page cache borrowed from meta inode
-	 * which are used for migration of encrypted inode's blocks.
-	 */
-	if (f2fs_sb_has_encrypt(sbi->sb))
-		invalidate_mapping_pages(META_MAPPING(sbi),
-				MAIN_BLKADDR(sbi), MAX_BLKADDR(sbi) - 1);
-
-	f2fs_release_ino_entry(sbi, false);
+	release_dirty_inode(sbi);
 
 	f2fs_reset_fsync_node_info(sbi);
 

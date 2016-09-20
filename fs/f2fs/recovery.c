@@ -747,18 +747,16 @@ out:
 	}
 	mutex_unlock(&sbi->cp_mutex);
 
-	/* let's drop all the directory inodes for clean checkpoint */
-	destroy_fsync_dnodes(&dir_list, err);
+	clear_sbi_flag(sbi, SBI_POR_DOING);
+	if (err)
+		set_ckpt_flags(sbi->ckpt, CP_ERROR_FLAG);
+	mutex_unlock(&sbi->cp_mutex);
 
-	if (need_writecp) {
-		set_sbi_flag(sbi, SBI_IS_RECOVERED);
-
-		if (!err) {
-			struct cp_control cpc = {
-				.reason = CP_RECOVERY,
-			};
-			err = f2fs_write_checkpoint(sbi, &cpc);
-		}
+	if (!err && need_writecp) {
+		struct cp_control cpc = {
+			.reason = CP_RECOVERY,
+		};
+		write_checkpoint(sbi, &cpc);
 	}
 
 	destroy_fsync_dnodes(&dir_list);
