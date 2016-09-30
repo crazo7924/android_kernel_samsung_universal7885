@@ -771,32 +771,25 @@ static int get_checkpoint_version(struct f2fs_sb_info *sbi, block_t cp_addr,
 	size_t crc_offset = 0;
 	__u32 crc = 0;
 
-	*cp_page = f2fs_get_meta_page(sbi, cp_addr);
-	if (IS_ERR(*cp_page))
-		return PTR_ERR(*cp_page);
-
+	*cp_page = get_meta_page(sbi, cp_addr);
 	*cp_block = (struct f2fs_checkpoint *)page_address(*cp_page);
 
 	crc_offset = le32_to_cpu((*cp_block)->checksum_offset);
-	if (crc_offset > (blk_size - sizeof(__le32))) {
-		f2fs_put_page(*cp_page, 1);
+	if (crc_offset >= blk_size) {
 		f2fs_msg(sbi->sb, KERN_WARNING,
 			"invalid crc_offset: %zu", crc_offset);
-		goto error;
+		return -EINVAL;
 	}
 
-	crc = cur_cp_crc(*cp_block);
-	if (!f2fs_crc_valid(sbi, crc, *cp_block, crc_offset)) {
-		f2fs_put_page(*cp_page, 1);
+	crc = le32_to_cpu(*((__le32 *)((unsigned char *)*cp_block
+							+ crc_offset)));
+	if (!f2fs_crc_valid(crc, *cp_block, crc_offset)) {
 		f2fs_msg(sbi->sb, KERN_WARNING, "invalid crc value");
-		goto error;
+		return -EINVAL;
 	}
 
 	*version = cur_cp_version(*cp_block);
 	return 0;
-error:
-	print_block_data(sbi->sb, cp_addr, page_address(*cp_page), 0, blk_size);
-	return -EINVAL;
 }
 
 static struct page *validate_checkpoint(struct f2fs_sb_info *sbi,
@@ -810,22 +803,14 @@ static struct page *validate_checkpoint(struct f2fs_sb_info *sbi,
 	err = get_checkpoint_version(sbi, cp_addr, &cp_block,
 					&cp_page_1, version);
 	if (err)
-		return NULL;
-
-	if (le32_to_cpu(cp_block->cp_pack_total_block_count) >
-					sbi->blocks_per_seg) {
-		f2fs_msg(sbi->sb, KERN_WARNING,
-			"invalid cp_pack_total_block_count:%u",
-			le32_to_cpu(cp_block->cp_pack_total_block_count));
-		goto invalid_cp;
-	}
+		goto invalid_cp1;
 	pre_version = *version;
 
 	cp_addr += le32_to_cpu(cp_block->cp_pack_total_block_count) - 1;
 	err = get_checkpoint_version(sbi, cp_addr, &cp_block,
 					&cp_page_2, version);
 	if (err)
-		goto invalid_cp;
+		goto invalid_cp2;
 	cur_version = *version;
 
 	if (cur_version == pre_version) {
