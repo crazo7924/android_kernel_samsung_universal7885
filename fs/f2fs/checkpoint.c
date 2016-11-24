@@ -872,6 +872,11 @@ int f2fs_get_valid_checkpoint(struct f2fs_sb_info *sbi)
 	if (sanity_check_ckpt(sbi))
 		goto fail_no_cp;
 
+	if (cur_page == cp1)
+		sbi->cur_cp_pack = 1;
+	else
+		sbi->cur_cp_pack = 2;
+
 	if (cp_blks <= 1)
 		goto done;
 
@@ -1441,40 +1446,7 @@ static int do_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	f2fs_reset_fsync_node_info(sbi);
 
 	clear_sbi_flag(sbi, SBI_IS_DIRTY);
-	clear_sbi_flag(sbi, SBI_NEED_CP);
-	clear_sbi_flag(sbi, SBI_QUOTA_SKIP_FLUSH);
-	sbi->unusable_block_count = 0;
 	__set_cp_next_pack(sbi);
-
-	/*
-	 * redirty superblock if metadata like node page or inode cache is
-	 * updated during writing checkpoint.
-	 */
-	if (get_pages(sbi, F2FS_DIRTY_NODES) ||
-			get_pages(sbi, F2FS_DIRTY_IMETA))
-		set_sbi_flag(sbi, SBI_IS_DIRTY);
-
-	f2fs_bug_on(sbi, get_pages(sbi, F2FS_DIRTY_DENTS));
-
-	return unlikely(f2fs_cp_error(sbi)) ? -EIO : 0;
-}
-
-#define	CP_TIME_RECORD_UNIT	1000000
-static void f2fs_update_max_cp_interval(struct f2fs_sb_info *sbi)
-{
-	unsigned long long cp_interval = 0;
-
-	curr_cp_time = local_clock();
-	if (!priv_cp_time)
-		goto out;
-
-	cp_interval = ((curr_cp_time - priv_cp_time) / CP_TIME_RECORD_UNIT) ?
-		((curr_cp_time - priv_cp_time) / CP_TIME_RECORD_UNIT) : 1;
-
-	if (sbi->sec_stat.cp_max_interval < cp_interval)
-		sbi->sec_stat.cp_max_interval = cp_interval;
-out:
-	priv_cp_time = curr_cp_time;
 }
 
 /*
