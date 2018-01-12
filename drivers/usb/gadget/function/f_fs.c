@@ -3242,28 +3242,7 @@ static int ffs_func_setup(struct usb_function *f,
 	__ffs_event_add(ffs, FUNCTIONFS_SETUP);
 	spin_unlock_irqrestore(&ffs->ev.waitq.lock, flags);
 
-	return creq->wLength == 0 ? USB_GADGET_DELAYED_STATUS : 0;
-}
-
-static bool ffs_func_req_match(struct usb_function *f,
-			       const struct usb_ctrlrequest *creq)
-{
-	struct ffs_function *func = ffs_func_from_usb(f);
-
-	if (!(func->ffs->user_flags & FUNCTIONFS_CONFIG0_SETUP))
-		return false;
-
-	switch (creq->bRequestType & USB_RECIP_MASK) {
-	case USB_RECIP_INTERFACE:
-		return (ffs_func_revmap_intf(func,
-					     le16_to_cpu(creq->wIndex)) >= 0);
-	case USB_RECIP_ENDPOINT:
-		return (ffs_func_revmap_ep(func,
-					   le16_to_cpu(creq->wIndex)) >= 0);
-	default:
-		return (bool) (func->ffs->user_flags &
-			       FUNCTIONFS_ALL_CTRL_RECIP);
-	}
+	return USB_GADGET_DELAYED_STATUS;
 }
 
 static void ffs_func_suspend(struct usb_function *f)
