@@ -2813,7 +2813,11 @@ static void tell_cpu_to_push(struct rq *rq)
 
 	rq->rt.push_flags = RT_PUSH_IPI_EXECUTING;
 
-	irq_work_queue_on(&rq->rt.push_work, cpu);
+	if (cpu >= 0) {
+		/* Make sure the rd does not get freed while pushing */
+		sched_get_rd(rq->rd);
+		irq_work_queue_on(&rq->rd->rto_push_work, cpu);
+	}
 }
 
 /* Called from hardirq context */
@@ -2846,12 +2850,10 @@ again:
 
 	raw_spin_unlock(&rd->rto_lock);
 
-	if (cpu >= nr_cpu_ids)
-		rt_rq->push_flags &= ~RT_PUSH_IPI_EXECUTING;
-	raw_spin_unlock(&rt_rq->push_lock);
-
-	if (cpu >= nr_cpu_ids)
+	if (cpu < 0) {
+		sched_put_rd(rd);
 		return;
+	}
 
 	/*
 	 * It is possible that a restart caused this CPU to be
