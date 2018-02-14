@@ -201,8 +201,6 @@ static int __get_v4l2_format32(struct v4l2_format __user *kp, struct
 		return copy_from_user(&kp->fmt.sdr, &up->fmt.sdr,
 				      sizeof(kp->fmt.sdr)) ? -EFAULT : 0;
 	default:
-		pr_info("compat_ioctl32: unexpected VIDIOC_FMT type %d\n",
-			kp->type);
 		return -EINVAL;
 	}
 }
@@ -271,8 +269,6 @@ static int __put_v4l2_format32(struct v4l2_format __user *kp, struct v4l2_format
 		return copy_to_user(&up->fmt.sdr, &kp->fmt.sdr,
 				    sizeof(kp->fmt.sdr)) ? -EFAULT : 0;
 	default:
-		pr_info("compat_ioctl32: unexpected VIDIOC_FMT type %d\n",
-			kp->type);
 		return -EINVAL;
 	}
 }
