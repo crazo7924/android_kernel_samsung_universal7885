@@ -368,10 +368,127 @@ static int exynos8890_tmu_initialize(struct platform_device *pdev)
 	pdata->cal_type = (trim_info >> EXYNOS_TMU_CALIB_SEL_SHIFT)
 			& EXYNOS_TMU_CALIB_SEL_MASK;
 
-	/* Check temp_error1 and error2 value */
-	data->temp_error1 = trim_info & EXYNOS_TMU_TEMP_MASK;
-	data->temp_error2 = (trim_info >> EXYNOS_TMU_TRIMINFO_85_P0_SHIFT)
-				& EXYNOS_TMU_TEMP_MASK;
+	/* Write temperature code for rising and falling threshold */
+	for (i = 0; i < of_thermal_get_ntrips(tz); i++) {
+		int rising_reg_offset, falling_reg_offset;
+		int j = 0;
+
+		switch (i) {
+		case 0:
+		case 1:
+		case 2:
+		case 3:
+			rising_reg_offset = EXYNOS5433_THD_TEMP_RISE3_0;
+			falling_reg_offset = EXYNOS5433_THD_TEMP_FALL3_0;
+			j = i;
+			break;
+		case 4:
+		case 5:
+		case 6:
+		case 7:
+			rising_reg_offset = EXYNOS5433_THD_TEMP_RISE7_4;
+			falling_reg_offset = EXYNOS5433_THD_TEMP_FALL7_4;
+			j = i - 4;
+			break;
+		default:
+			continue;
+		}
+
+		/* Write temperature code for rising threshold */
+		tz->ops->get_trip_temp(tz, i, &temp);
+		temp /= MCELSIUS;
+		threshold_code = temp_to_code(data, temp);
+
+		rising_threshold = readl(data->base + rising_reg_offset);
+		rising_threshold &= ~(0xff << j * 8);
+		rising_threshold |= (threshold_code << j * 8);
+		writel(rising_threshold, data->base + rising_reg_offset);
+
+		/* Write temperature code for falling threshold */
+		tz->ops->get_trip_hyst(tz, i, &temp_hist);
+		temp_hist = temp - (temp_hist / MCELSIUS);
+		threshold_code = temp_to_code(data, temp_hist);
+
+		falling_threshold = readl(data->base + falling_reg_offset);
+		falling_threshold &= ~(0xff << j * 8);
+		falling_threshold |= (threshold_code << j * 8);
+		writel(falling_threshold, data->base + falling_reg_offset);
+	}
+
+	data->tmu_clear_irqs(data);
+out:
+	return ret;
+}
+
+static int exynos5440_tmu_initialize(struct platform_device *pdev)
+{
+	struct exynos_tmu_data *data = platform_get_drvdata(pdev);
+	unsigned int trim_info = 0, con, rising_threshold;
+	int threshold_code;
+	int crit_temp = 0;
+
+	/*
+	 * For exynos5440 soc triminfo value is swapped between TMU0 and
+	 * TMU2, so the below logic is needed.
+	 */
+	switch (data->id) {
+	case 0:
+		trim_info = readl(data->base + EXYNOS5440_EFUSE_SWAP_OFFSET +
+				 EXYNOS5440_TMU_S0_7_TRIM);
+		break;
+	case 1:
+		trim_info = readl(data->base + EXYNOS5440_TMU_S0_7_TRIM);
+		break;
+	case 2:
+		trim_info = readl(data->base - EXYNOS5440_EFUSE_SWAP_OFFSET +
+				  EXYNOS5440_TMU_S0_7_TRIM);
+	}
+	sanitize_temp_error(data, trim_info);
+
+	/* Write temperature code for rising and falling threshold */
+	rising_threshold = readl(data->base + EXYNOS5440_TMU_S0_7_TH0);
+	rising_threshold = get_th_reg(data, rising_threshold, false);
+	writel(rising_threshold, data->base + EXYNOS5440_TMU_S0_7_TH0);
+	writel(0, data->base + EXYNOS5440_TMU_S0_7_TH1);
+
+	data->tmu_clear_irqs(data);
+
+	/* if last threshold limit is also present */
+	if (!data->tzd->ops->get_crit_temp(data->tzd, &crit_temp)) {
+		threshold_code = temp_to_code(data, crit_temp / MCELSIUS);
+		/* 5th level to be assigned in th2 reg */
+		rising_threshold =
+			threshold_code << EXYNOS5440_TMU_TH_RISE4_SHIFT;
+		writel(rising_threshold, data->base + EXYNOS5440_TMU_S0_7_TH2);
+		con = readl(data->base + EXYNOS5440_TMU_S0_7_CTRL);
+		con |= (1 << EXYNOS_TMU_THERM_TRIP_EN_SHIFT);
+		writel(con, data->base + EXYNOS5440_TMU_S0_7_CTRL);
+	}
+	/* Clear the PMIN in the common TMU register */
+	if (!data->id)
+		writel(0, data->base_second + EXYNOS5440_TMU_PMIN);
+
+	return 0;
+}
+
+static int exynos7_tmu_initialize(struct platform_device *pdev)
+{
+	struct exynos_tmu_data *data = platform_get_drvdata(pdev);
+	struct thermal_zone_device *tz = data->tzd;
+	struct exynos_tmu_platform_data *pdata = data->pdata;
+	unsigned int status, trim_info;
+	unsigned int rising_threshold = 0, falling_threshold = 0;
+	int ret = 0, threshold_code, i;
+	int temp, temp_hist;
+	unsigned int reg_off, bit_off;
+
+	status = readb(data->base + EXYNOS_TMU_REG_STATUS);
+	if (!status) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	trim_info = readl(data->base + EXYNOS_TMU_REG_TRIMINFO);
 
 	if (!data->temp_error1)
 		data->temp_error1 = pdata->efuse_value & EXYNOS_TMU_TEMP_MASK;
