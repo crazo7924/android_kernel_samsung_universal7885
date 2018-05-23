@@ -1084,29 +1084,7 @@ next_dnode:
 		goto unlock_out;
 	}
 
-	start_pgofs = pgofs;
-	prealloc = 0;
-	last_ofs_in_node = ofs_in_node = dn.ofs_in_node;
-	end_offset = ADDRS_PER_PAGE(dn.node_page, inode);
-
-next_block:
-	blkaddr = datablock_addr(dn.inode, dn.node_page, dn.ofs_in_node);
-
-	if (__is_valid_data_blkaddr(blkaddr) &&
-		!f2fs_is_valid_blkaddr(sbi, blkaddr, DATA_GENERIC)) {
-		err = -EFAULT;
-		goto sync_out;
-	}
-
-	if (is_valid_data_blkaddr(sbi, blkaddr)) {
-		/* use out-place-update for driect IO under LFS mode */
-		if (test_opt(sbi, LFS) && create &&
-				flag == F2FS_GET_BLOCK_DIO) {
-			err = __allocate_data_block(&dn, map->m_seg_type);
-			if (!err)
-				set_inode_flag(inode, FI_APPEND_WRITE);
-		}
-	} else {
+	if (!is_valid_blkaddr(dn.data_blkaddr)) {
 		if (create) {
 			if (unlikely(f2fs_cp_error(sbi))) {
 				err = -EIO;
@@ -1877,29 +1855,20 @@ got_it:
 	 * If current allocation needs SSR,
 	 * it had better in-place writes for updated data.
 	 */
-	if (ipu_force || (is_valid_data_blkaddr(fio->sbi, fio->old_blkaddr) &&
-					need_inplace_update(fio))) {
-		err = encrypt_one_page(fio);
-		if (err)
-			goto out_writepage;
-
-		set_page_writeback(page);
-		ClearPageError(page);
-		f2fs_put_dnode(&dn);
-		if (fio->need_lock == LOCK_REQ)
-			f2fs_unlock_op(fio->sbi);
-		err = f2fs_inplace_write_data(fio);
-		trace_f2fs_do_write_data_page(fio->page, IPU);
-		set_inode_flag(inode, FI_UPDATE_WRITE);
-		return err;
-	}
-
-	if (fio->need_lock == LOCK_RETRY) {
-		if (!f2fs_trylock_op(fio->sbi)) {
-			err = -EAGAIN;
-			goto out_writepage;
-		}
-		fio->need_lock = LOCK_REQ;
+	if (unlikely(is_valid_blkaddr(fio->blk_addr) &&
+			!is_cold_data(page) &&
+			need_inplace_update(inode))) {
+		rewrite_data_page(fio);
+		set_inode_flag(F2FS_I(inode), FI_UPDATE_WRITE);
+		trace_f2fs_do_write_data_page(page, IPU);
+	} else {
+		write_data_page(&dn, fio);
+		set_data_blkaddr(&dn);
+		f2fs_update_extent_cache(&dn);
+		trace_f2fs_do_write_data_page(page, OPU);
+		set_inode_flag(F2FS_I(inode), FI_APPEND_WRITE);
+		if (page->index == 0)
+			set_inode_flag(F2FS_I(inode), FI_FIRST_BLOCK_WRITTEN);
 	}
 
 	err = f2fs_get_node_info(fio->sbi, dn.nid, &ni);
