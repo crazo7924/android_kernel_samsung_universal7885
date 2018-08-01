@@ -465,7 +465,10 @@ int f2fs_submit_page_bio(struct f2fs_io_info *fio)
 			__is_meta_io(fio) ? META_GENERIC : DATA_GENERIC))
 		return -EFAULT;
 
-	verify_block_addr(fio, fio->blk_addr);
+	if (!f2fs_is_valid_blkaddr(fio->sbi, fio->blk_addr,
+			__is_meta_io(fio) ? META_GENERIC : DATA_GENERIC))
+		return -EFAULT;
+
 	trace_f2fs_submit_page_bio(page, fio);
 	f2fs_trace_ios(fio, 0);
 
@@ -1082,6 +1085,12 @@ next_dnode:
 					f2fs_get_next_page_offset(&dn, pgofs);
 		}
 		goto unlock_out;
+	}
+
+	if (__is_valid_data_blkaddr(dn.data_blkaddr) &&
+		!f2fs_is_valid_blkaddr(sbi, dn.data_blkaddr, DATA_GENERIC)) {
+		err = -EFAULT;
+		goto sync_out;
 	}
 
 	if (!is_valid_data_blkaddr(sbi, dn.data_blkaddr)) {
@@ -1851,6 +1860,12 @@ got_it:
 	else if (file_is_cold(inode))
 		F2FS_I_SB(inode)->sec_stat.cold_file_written_blocks++;
 
+	if (__is_valid_data_blkaddr(fio->blk_addr) &&
+		!f2fs_is_valid_blkaddr(fio->sbi, fio->blk_addr,
+							DATA_GENERIC)) {
+		err = -EFAULT;
+		goto out_writepage;
+	}
 	/*
 	 * If current allocation needs SSR,
 	 * it had better in-place writes for updated data.
