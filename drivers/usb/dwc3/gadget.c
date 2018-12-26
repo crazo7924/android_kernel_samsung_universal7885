@@ -2045,11 +2045,10 @@ static int dwc3_gadget_start(struct usb_gadget *g,
 
 	spin_unlock_irqrestore(&dwc->lock, flags);
 
-#ifdef CONFIG_USBIRQ_BALANCING_LTE_HIGHTP
-	gadget_irq = irq;
-	rndis_notifier.notifier_call = rndis_notify_callback;
-	register_netdevice_notifier(&rndis_notifier);
-#endif
+	/* begin to receive SETUP packets */
+	dwc->ep0state = EP0_SETUP_PHASE;
+	dwc->link_state = DWC3_LINK_STATE_SS_DIS;
+	dwc3_ep0_out_start(dwc);
 
 #ifdef CONFIG_ARGOS
 	if (!zalloc_cpumask_var(&affinity_cpu_mask, GFP_KERNEL))
