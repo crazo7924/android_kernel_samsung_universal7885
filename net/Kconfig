@@ -394,7 +394,7 @@ config LWTUNNEL
 	  with light weight tunnel state associated with fib routes.
 
 config DST_CACHE
-	bool "dst cache"
+	bool
 	default n
 
 endif   # if NET
@@ -403,9 +403,5 @@ endif   # if NET
 config HAVE_BPF_JIT
 	bool
 
-# Cross Layer TCP
-config CLTCP
-	bool "Cross Layer TCP"
-	---help---
-	This feature implements Cross Layer TCP (CLTCP)
-
+config HAVE_EBPF_JIT
+	bool

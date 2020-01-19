@@ -1524,7 +1524,6 @@ ffs_fs_kill_sb(struct super_block *sb)
 	if (sb->s_fs_info) {
 		ffs_release_dev(sb->s_fs_info);
 		ffs_data_closed(sb->s_fs_info);
-		ffs_data_put(sb->s_fs_info);
 	}
 }
 
@@ -2959,10 +2958,8 @@ static int _ffs_func_bind(struct usb_configuration *c,
 	struct ffs_data *ffs = func->ffs;
 
 	const int full = !!func->ffs->fs_descs_count;
-	const int high = gadget_is_dualspeed(func->gadget) &&
-		func->ffs->hs_descs_count;
-	const int super = gadget_is_superspeed(func->gadget) &&
-		func->ffs->ss_descs_count;
+	const int high = !!func->ffs->hs_descs_count;
+	const int super = !!func->ffs->ss_descs_count;
 
 	int fs_len, hs_len, ss_len, ret, i;
 	struct ffs_ep *eps_ptr;
@@ -3245,28 +3242,7 @@ static int ffs_func_setup(struct usb_function *f,
 	__ffs_event_add(ffs, FUNCTIONFS_SETUP);
 	spin_unlock_irqrestore(&ffs->ev.waitq.lock, flags);
 
-	return creq->wLength == 0 ? USB_GADGET_DELAYED_STATUS : 0;
-}
-
-static bool ffs_func_req_match(struct usb_function *f,
-			       const struct usb_ctrlrequest *creq)
-{
-	struct ffs_function *func = ffs_func_from_usb(f);
-
-	if (!(func->ffs->user_flags & FUNCTIONFS_CONFIG0_SETUP))
-		return false;
-
-	switch (creq->bRequestType & USB_RECIP_MASK) {
-	case USB_RECIP_INTERFACE:
-		return (ffs_func_revmap_intf(func,
-					     le16_to_cpu(creq->wIndex)) >= 0);
-	case USB_RECIP_ENDPOINT:
-		return (ffs_func_revmap_ep(func,
-					   le16_to_cpu(creq->wIndex)) >= 0);
-	default:
-		return (bool) (func->ffs->user_flags &
-			       FUNCTIONFS_ALL_CTRL_RECIP);
-	}
+	return USB_GADGET_DELAYED_STATUS;
 }
 
 static void ffs_func_suspend(struct usb_function *f)

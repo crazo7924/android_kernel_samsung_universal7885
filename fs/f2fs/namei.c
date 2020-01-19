@@ -299,8 +299,7 @@ static int f2fs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 
 	f2fs_alloc_nid_done(sbi, ino);
 
-	unlock_new_inode(inode);
-	d_instantiate(dentry, inode);
+	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
@@ -605,8 +604,7 @@ static int f2fs_symlink(struct inode *dir, struct dentry *dentry,
 	err = page_symlink(inode, disk_link.name, disk_link.len);
 
 err_out:
-	unlock_new_inode(inode);
-	d_instantiate(dentry, inode);
+	d_instantiate_new(dentry, inode);
 
 	/*
 	 * Let's flush symlink data in order to avoid broken symlink as much as
@@ -669,8 +667,7 @@ static int f2fs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 
 	f2fs_alloc_nid_done(sbi, inode->i_ino);
 
-	unlock_new_inode(inode);
-	d_instantiate(dentry, inode);
+	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
@@ -724,8 +721,7 @@ static int f2fs_mknod(struct inode *dir, struct dentry *dentry,
 
 	f2fs_alloc_nid_done(sbi, inode->i_ino);
 
-	unlock_new_inode(inode);
-	d_instantiate(dentry, inode);
+	d_instantiate_new(dentry, inode);
 
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
@@ -1205,20 +1201,62 @@ static int f2fs_rename2(struct inode *old_dir, struct dentry *old_dentry,
 static const char *f2fs_encrypted_follow_link(struct dentry *dentry, void **cookie)
 {
 	struct inode *inode = d_inode(dentry);
-	struct page *page;
-	void *target;
+	struct f2fs_encrypted_symlink_data *sd;
+	loff_t size = min_t(loff_t, i_size_read(inode), PAGE_SIZE - 1);
+	u32 max_size = inode->i_sb->s_blocksize;
+	int res;
+
+	res = f2fs_get_encryption_info(inode);
+	if (res)
+		return ERR_PTR(res);
+
+	cpage = read_mapping_page(inode->i_mapping, 0, NULL);
+	if (IS_ERR(cpage))
+		return ERR_CAST(cpage);
+	caddr = page_address(cpage);
+	caddr[size] = 0;
+
+	/* Symlink is encrypted */
+	sd = (struct f2fs_encrypted_symlink_data *)caddr;
+	cstr.len = le16_to_cpu(sd->len);
+	cstr.name = kmalloc(cstr.len, GFP_NOFS);
+	if (!cstr.name) {
+		res = -ENOMEM;
+		goto errout;
+	}
+	memcpy(cstr.name, sd->encrypted_path, cstr.len);
 
 	if (!dentry)
 		return ERR_PTR(-ECHILD);
 
-	page = read_mapping_page(inode->i_mapping, 0, NULL);
-	if (IS_ERR(page))
-		return ERR_CAST(page);
+	if ((cstr.len + sizeof(struct f2fs_encrypted_symlink_data) - 1) >
+								max_size) {
+		/* Symlink data on the disk is corrupted */
+		res = -EIO;
+		goto errout;
+	}
+	res = f2fs_fname_crypto_alloc_buffer(inode, cstr.len, &pstr);
+	if (res)
+		goto errout;
 
-	target = fscrypt_get_symlink(inode, page_address(page),
-				     inode->i_sb->s_blocksize);
-	put_page(page);
-	return *cookie = target;
+	res = f2fs_fname_disk_to_usr(inode, NULL, &cstr, &pstr);
+	if (res < 0)
+		goto errout;
+
+	kfree(cstr.name);
+
+	paddr = pstr.name;
+
+	/* Null-terminate the name */
+	paddr[res] = '\0';
+
+	page_cache_release(cpage);
+	return *cookie = paddr;
+errout:
+	kfree(cstr.name);
+	f2fs_fname_crypto_free_buffer(&pstr);
+	page_cache_release(cpage);
+	return ERR_PTR(res);
 }
 
 const struct inode_operations f2fs_encrypted_symlink_inode_operations = {

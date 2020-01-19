@@ -1110,6 +1110,8 @@ static int do_sched_rt_period_timer(struct rt_bandwidth *rt_b, int overrun)
 		struct rq *rq = rq_of_rt_rq(rt_rq);
 
 		raw_spin_lock(&rq->lock);
+		update_rq_clock(rq);
+
 		if (rt_rq->rt_time) {
 			u64 runtime;
 
@@ -2735,9 +2737,9 @@ static void push_rt_tasks(struct rq *rq)
  * rq->rt.push_cpu holds the last cpu returned by this function,
  * or if this is the first instance, it must hold rq->cpu.
  */
-static int rto_next_cpu(struct rq *rq)
+static int rto_next_cpu(struct root_domain *rd)
 {
-	int prev_cpu = rq->rt.push_cpu;
+	int next;
 	int cpu;
 
 	cpu = cpumask_next(prev_cpu, rq->rd->rto_mask);
@@ -2801,12 +2803,8 @@ static void tell_cpu_to_push(struct rq *rq)
 			 * Tell the IPI to restart the loop as things have
 			 * changed since it started.
 	 */
-			rq->rt.push_flags |= RT_PUSH_IPI_RESTART;
-			raw_spin_unlock(&rq->rt.push_lock);
-			return;
-		}
-		raw_spin_unlock(&rq->rt.push_lock);
-	}
+	if (rq->rd->rto_cpu < 0)
+		cpu = rto_next_cpu(rq->rd);
 
 	/* When here, there's no IPI going around */
 
@@ -2817,15 +2815,19 @@ static void tell_cpu_to_push(struct rq *rq)
 
 	rq->rt.push_flags = RT_PUSH_IPI_EXECUTING;
 
-	irq_work_queue_on(&rq->rt.push_work, cpu);
+	if (cpu >= 0) {
+		/* Make sure the rd does not get freed while pushing */
+		sched_get_rd(rq->rd);
+		irq_work_queue_on(&rq->rd->rto_push_work, cpu);
+	}
 }
 
 /* Called from hardirq context */
 static void try_to_push_tasks(void *arg)
 {
-	struct rt_rq *rt_rq = arg;
-	struct rq *rq, *src_rq;
-	int this_cpu;
+	struct root_domain *rd =
+		container_of(work, struct root_domain, rto_push_work);
+	struct rq *rq;
 	int cpu;
 
 	this_cpu = rt_rq->push_cpu;
@@ -2843,25 +2845,17 @@ again:
 		raw_spin_unlock(&rq->lock);
 	}
 
+	raw_spin_lock(&rd->rto_lock);
+
 	/* Pass the IPI to the next rt overloaded queue */
-	raw_spin_lock(&rt_rq->push_lock);
-	/*
-	 * If the source queue changed since the IPI went out,
-	 * we need to restart the search from that CPU again.
-	 */
-	if (rt_rq->push_flags & RT_PUSH_IPI_RESTART) {
-		rt_rq->push_flags &= ~RT_PUSH_IPI_RESTART;
-		rt_rq->push_cpu = src_rq->cpu;
-	}
+	cpu = rto_next_cpu(rd);
 
-	cpu = find_next_push_cpu(src_rq);
+	raw_spin_unlock(&rd->rto_lock);
 
-	if (cpu >= nr_cpu_ids)
-		rt_rq->push_flags &= ~RT_PUSH_IPI_EXECUTING;
-	raw_spin_unlock(&rt_rq->push_lock);
-
-	if (cpu >= nr_cpu_ids)
+	if (cpu < 0) {
+		sched_put_rd(rd);
 		return;
+	}
 
 	/*
 	 * It is possible that a restart caused this CPU to be
@@ -2872,14 +2866,7 @@ again:
 		goto again;
 
 	/* Try the next RT overloaded CPU */
-	irq_work_queue_on(&rt_rq->push_work, cpu);
-}
-
-static void push_irq_work_func(struct irq_work *work)
-{
-	struct rt_rq *rt_rq = container_of(work, struct rt_rq, push_work);
-
-	try_to_push_tasks(rt_rq);
+	irq_work_queue_on(&rd->rto_push_work, cpu);
 }
 #endif /* HAVE_RT_PUSH_IPI */
 
@@ -3070,8 +3057,8 @@ static void switched_to_rt(struct rq *rq, struct task_struct *p)
 #ifdef CONFIG_SMP
 		if (p->nr_cpus_allowed > 1 && rq->rt.overloaded)
 			queue_push_tasks(rq);
-#else
-		if (p->prio < rq->curr->prio)
+#endif /* CONFIG_SMP */
+		if (p->prio < rq->curr->prio && cpu_online(cpu_of(rq)))
 			resched_curr(rq);
 #endif /* CONFIG_SMP */
 	}

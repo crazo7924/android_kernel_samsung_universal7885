@@ -131,6 +131,7 @@ unsigned long long sysctl_tcp_cltcp_ifdevs __read_mostly;
 #define FLAG_DSACKING_ACK	0x800 /* SACK blocks contained D-SACK info */
 #define FLAG_SACK_RENEGING	0x2000 /* snd_una advanced to a sacked seq */
 #define FLAG_UPDATE_TS_RECENT	0x4000 /* tcp_replace_ts_recent() */
+#define FLAG_NO_CHALLENGE_ACK	0x8000 /* do not call tcp_send_challenge_ack()	*/
 
 #define FLAG_ACKED		(FLAG_DATA_ACKED|FLAG_SYN_ACKED)
 #define FLAG_NOT_DUP		(FLAG_DATA|FLAG_WIN_UPDATE|FLAG_ACKED)
@@ -913,8 +914,8 @@ static void cltcp_rwnd_max_adjustment(struct tcp_sock *tp)
 void tcp_rcv_space_adjust(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+	u32 copied;
 	int time;
-	int copied;
 
 	time = tcp_time_stamp - tp->rcvq_space.time;
 #ifdef CONFIG_MPTCP
@@ -958,12 +959,13 @@ void tcp_rcv_space_adjust(struct sock *sk)
 
 	if (sysctl_tcp_moderate_rcvbuf &&
 	    !(sk->sk_userlocks & SOCK_RCVBUF_LOCK)) {
-		int rcvwin, rcvmem, rcvbuf;
+		int rcvmem, rcvbuf;
+		u64 rcvwin;
 
 		/* minimal window to cope with packet losses, assuming
 		 * steady state. Add some cushion because of small variations.
 		 */
-		rcvwin = (copied << 1) + 16 * tp->advmss;
+		rcvwin = ((u64)copied << 1) + 16 * tp->advmss;
 
 		/* If rate increased by 25%,
 		 *	assume slow start, rcvwin = 3 * copied
@@ -983,23 +985,13 @@ void tcp_rcv_space_adjust(struct sock *sk)
 		while (tcp_win_from_space(rcvmem) < tp->advmss)
 			rcvmem += 128;
 
-#ifdef CONFIG_CLTCP
-		if (cltcp(tp)) {
-			cltcp_rwnd_max_adjustment(tp);
-			
-			rcvbuf = min(rcvwin / tp->advmss * rcvmem, cltcp_rmem_max(tp));
-		} else 
-#endif
-		rcvbuf = min(rcvwin / tp->advmss * rcvmem, sysctl_tcp_rmem[2]);
-		
-#ifdef CONFIG_CLTCP
-		cltcp_debug("%s final rcvbuf %d\n", __func__, rcvbuf);
-#endif
+		do_div(rcvwin, tp->advmss);
+		rcvbuf = min_t(u64, rcvwin * rcvmem, sysctl_tcp_rmem[2]);
 		if (rcvbuf > sk->sk_rcvbuf) {
 			sk->sk_rcvbuf = rcvbuf;
 
 			/* Make the window clamp follow along.  */
-			tp->window_clamp = rcvwin;
+			tp->window_clamp = tcp_win_from_space(rcvbuf);
 		}
 #ifdef CONFIG_CLTCP
 		else if (cltcp(tp) && cltcp_rmem_max(tp) < sk->sk_rcvbuf){
@@ -3975,7 +3967,8 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	if (before(ack, prior_snd_una)) {
 		/* RFC 5961 5.2 [Blind Data Injection Attack].[Mitigation] */
 		if (before(ack, prior_snd_una - tp->max_window)) {
-			tcp_send_challenge_ack(sk, skb);
+			if (!(flag & FLAG_NO_CHALLENGE_ACK))
+				tcp_send_challenge_ack(sk, skb);
 			return -1;
 		}
 		goto old_ack;
@@ -4328,11 +4321,8 @@ const u8 *tcp_parse_md5sig_option(const struct tcphdr *th)
 	int length = (th->doff << 2) - sizeof(*th);
 	const u8 *ptr = (const u8 *)(th + 1);
 
-	/* If the TCP option is too short, we can short cut */
-	if (length < TCPOLEN_MD5SIG)
-		return NULL;
-
-	while (length > 0) {
+	/* If not enough data remaining, we can short cut */
+	while (length >= TCPOLEN_MD5SIG) {
 		int opcode = *ptr++;
 		int opsize;
 
@@ -6101,10 +6091,6 @@ void tcp_finish_connect(struct sock *sk, struct sk_buff *skb)
 	else
 		tp->pred_flags = 0;
 
-	if (!sock_flag(sk, SOCK_DEAD)) {
-		sk->sk_state_change(sk);
-		sk_wake_async(sk, SOCK_WAKE_IO, POLL_OUT);
-	}
 }
 
 static bool tcp_rcv_fastopen_synack(struct sock *sk, struct sk_buff *synack,
@@ -6180,15 +6166,8 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct tcp_fastopen_cookie foc = { .len = -1 };
 	int saved_clamp = tp->rx_opt.mss_clamp;
-	
-	
-#ifdef CONFIG_MPTCP
-	struct mptcp_options_received mopt;
-	mptcp_init_mp_opt(&mopt);
+	bool fastopen_fail;
 
-	tcp_parse_options(skb, &tp->rx_opt,
-			  mptcp(tp) ? &tp->mptcp->rx_opt : &mopt, 0, &foc, tp);
-#else
 	tcp_parse_options(skb, &tp->rx_opt, 0, &foc);
 #endif
 	if (tp->rx_opt.saw_tstamp && tp->rx_opt.rcv_tsecr)
@@ -6323,19 +6302,16 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 
 		tcp_finish_connect(sk, skb);
 
-		if ((tp->syn_fastopen || tp->syn_data) &&
-		    tcp_rcv_fastopen_synack(sk, skb, &foc))
-			return -1;
+		fastopen_fail = (tp->syn_fastopen || tp->syn_data) &&
+				tcp_rcv_fastopen_synack(sk, skb, &foc);
 
-	/* With MPTCP we cannot send data on the third ack due to the
-		 * lack of option-space to combine with an MP_CAPABLE.
-		 */
-		 
-		if (
-#ifdef CONFIG_MPTCP
-			!mptcp(tp) && (
-#endif
-			sk->sk_write_pending ||
+		if (!sock_flag(sk, SOCK_DEAD)) {
+			sk->sk_state_change(sk);
+			sk_wake_async(sk, SOCK_WAKE_IO, POLL_OUT);
+		}
+		if (fastopen_fail)
+			return -1;
+		if (sk->sk_write_pending ||
 		    icsk->icsk_accept_queue.rskq_defer_accept ||
 		    icsk->icsk_ack.pingpong
 #ifdef CONFIG_MPTCP
@@ -6559,13 +6535,17 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 
 	/* step 5: check the ACK field */
 	acceptable = tcp_ack(sk, skb, FLAG_SLOWPATH |
-				      FLAG_UPDATE_TS_RECENT) > 0;
+				      FLAG_UPDATE_TS_RECENT |
+				      FLAG_NO_CHALLENGE_ACK) > 0;
 
+	if (!acceptable) {
+		if (sk->sk_state == TCP_SYN_RECV)
+			return 1;	/* send one RST */
+		tcp_send_challenge_ack(sk, skb);
+		goto discard;
+	}
 	switch (sk->sk_state) {
 	case TCP_SYN_RECV:
-		if (!acceptable)
-			return 1;
-
 		if (!tp->srtt_us)
 			tcp_synack_rtt_meas(sk, req);
 
@@ -6650,14 +6630,6 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		 * our SYNACK so stop the SYNACK timer.
 		 */
 		if (req) {
-			/* Return RST if ack_seq is invalid.
-			 * Note that RFC793 only says to generate a
-			 * DUPACK for it but for TCP Fast Open it seems
-			 * better to treat this case like TCP_SYN_RECV
-			 * above.
-			 */
-			if (!acceptable)
-				return 1;
 			/* We no longer need the request sock. */
 			reqsk_fastopen_remove(sk, req, false);
 			tcp_rearm_rto(sk);

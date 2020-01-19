@@ -1325,30 +1325,8 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 			goto out_free;
 	}
 
-#ifdef CONFIG_RKP_NS_PROT
-	nsflags = old->mnt->mnt_flags & ~(MNT_WRITE_HOLD|MNT_MARKED);
-	/* Don't allow unprivileged users to change mount flags */
-	if (flag & CL_UNPRIVILEGED) {
-		nsflags |= MNT_LOCK_ATIME;
-
-		if (nsflags & MNT_READONLY)
-			nsflags |= MNT_LOCK_READONLY;
-
-		if (nsflags & MNT_NODEV)
-			nsflags |= MNT_LOCK_NODEV;
-
-		if (nsflags & MNT_NOSUID)
-			nsflags |= MNT_LOCK_NOSUID;
-
-		if (nsflags & MNT_NOEXEC)
-			nsflags |= MNT_LOCK_NOEXEC;
-	}
-	if ((flag & CL_UNPRIVILEGED) &&
-	    (!(flag & CL_EXPIRE) || list_empty(&old->mnt_expire)))
-		nsflags |= MNT_LOCKED;
-	rkp_assign_mnt_flags(mnt->mnt,nsflags);
-#else
-	mnt->mnt.mnt_flags = old->mnt.mnt_flags & ~(MNT_WRITE_HOLD|MNT_MARKED);
+	mnt->mnt.mnt_flags = old->mnt.mnt_flags;
+	mnt->mnt.mnt_flags &= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);
 	/* Don't allow unprivileged users to change mount flags */
 	if (flag & CL_UNPRIVILEGED) {
 		mnt->mnt.mnt_flags |= MNT_LOCK_ATIME;

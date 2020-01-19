@@ -432,8 +432,8 @@ static const char *table_lookup_model(struct cpuinfo_x86 *c)
 	return NULL;		/* Not found */
 }
 
-__u32 cpu_caps_cleared[NCAPINTS];
-__u32 cpu_caps_set[NCAPINTS];
+__u32 cpu_caps_cleared[NCAPINTS + NBUGINTS];
+__u32 cpu_caps_set[NCAPINTS + NBUGINTS];
 
 void load_percpu_segment(int cpu)
 {
@@ -664,52 +664,61 @@ void cpu_detect(struct cpuinfo_x86 *c)
 	}
 }
 
+static void apply_forced_caps(struct cpuinfo_x86 *c)
+{
+	int i;
+
+	for (i = 0; i < NCAPINTS + NBUGINTS; i++) {
+		c->x86_capability[i] &= ~cpu_caps_cleared[i];
+		c->x86_capability[i] |= cpu_caps_set[i];
+	}
+}
+
 void get_cpu_cap(struct cpuinfo_x86 *c)
 {
-	u32 tfms, xlvl;
-	u32 ebx;
+	u32 eax, ebx, ecx, edx;
 
 	/* Intel-defined flags: level 0x00000001 */
 	if (c->cpuid_level >= 0x00000001) {
-		u32 capability, excap;
+		cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
 
-		cpuid(0x00000001, &tfms, &ebx, &excap, &capability);
-		c->x86_capability[0] = capability;
-		c->x86_capability[4] = excap;
+		c->x86_capability[CPUID_1_ECX] = ecx;
+		c->x86_capability[CPUID_1_EDX] = edx;
 	}
+
+	/* Thermal and Power Management Leaf: level 0x00000006 (eax) */
+	if (c->cpuid_level >= 0x00000006)
+		c->x86_capability[CPUID_6_EAX] = cpuid_eax(0x00000006);
 
 	/* Additional Intel-defined flags: level 0x00000007 */
 	if (c->cpuid_level >= 0x00000007) {
-		u32 eax, ebx, ecx, edx;
-
 		cpuid_count(0x00000007, 0, &eax, &ebx, &ecx, &edx);
-
-		c->x86_capability[9] = ebx;
+		c->x86_capability[CPUID_7_0_EBX] = ebx;
+		c->x86_capability[CPUID_7_ECX] = ecx;
 	}
 
 	/* Extended state features: level 0x0000000d */
 	if (c->cpuid_level >= 0x0000000d) {
-		u32 eax, ebx, ecx, edx;
-
 		cpuid_count(0x0000000d, 1, &eax, &ebx, &ecx, &edx);
 
-		c->x86_capability[10] = eax;
+		c->x86_capability[CPUID_D_1_EAX] = eax;
 	}
 
 	/* Additional Intel-defined flags: level 0x0000000F */
 	if (c->cpuid_level >= 0x0000000F) {
-		u32 eax, ebx, ecx, edx;
 
 		/* QoS sub-leaf, EAX=0Fh, ECX=0 */
 		cpuid_count(0x0000000F, 0, &eax, &ebx, &ecx, &edx);
-		c->x86_capability[11] = edx;
+		c->x86_capability[CPUID_F_0_EDX] = edx;
+
 		if (cpu_has(c, X86_FEATURE_CQM_LLC)) {
 			/* will be overridden if occupancy monitoring exists */
 			c->x86_cache_max_rmid = ebx;
 
 			/* QoS sub-leaf, EAX=0Fh, ECX=1 */
 			cpuid_count(0x0000000F, 1, &eax, &ebx, &ecx, &edx);
-			c->x86_capability[12] = edx;
+			c->x86_capability[CPUID_F_1_EDX] = edx;
+
 			if (cpu_has(c, X86_FEATURE_CQM_OCCUP_LLC)) {
 				c->x86_cache_max_rmid = ecx;
 				c->x86_cache_occ_scale = ebx;
@@ -721,30 +730,39 @@ void get_cpu_cap(struct cpuinfo_x86 *c)
 	}
 
 	/* AMD-defined flags: level 0x80000001 */
-	xlvl = cpuid_eax(0x80000000);
-	c->extended_cpuid_level = xlvl;
+	eax = cpuid_eax(0x80000000);
+	c->extended_cpuid_level = eax;
 
-	if ((xlvl & 0xffff0000) == 0x80000000) {
-		if (xlvl >= 0x80000001) {
-			c->x86_capability[1] = cpuid_edx(0x80000001);
-			c->x86_capability[6] = cpuid_ecx(0x80000001);
+	if ((eax & 0xffff0000) == 0x80000000) {
+		if (eax >= 0x80000001) {
+			cpuid(0x80000001, &eax, &ebx, &ecx, &edx);
+
+			c->x86_capability[CPUID_8000_0001_ECX] = ecx;
+			c->x86_capability[CPUID_8000_0001_EDX] = edx;
 		}
 	}
 
+	if (c->extended_cpuid_level >= 0x80000007) {
+		cpuid(0x80000007, &eax, &ebx, &ecx, &edx);
+
+		c->x86_capability[CPUID_8000_0007_EBX] = ebx;
+		c->x86_power = edx;
+	}
+
 	if (c->extended_cpuid_level >= 0x80000008) {
-		u32 eax = cpuid_eax(0x80000008);
+		cpuid(0x80000008, &eax, &ebx, &ecx, &edx);
 
 		c->x86_virt_bits = (eax >> 8) & 0xff;
 		c->x86_phys_bits = eax & 0xff;
-		c->x86_capability[13] = cpuid_ebx(0x80000008);
+		c->x86_capability[CPUID_8000_0008_EBX] = ebx;
 	}
 #ifdef CONFIG_X86_32
 	else if (cpu_has(c, X86_FEATURE_PAE) || cpu_has(c, X86_FEATURE_PSE36))
 		c->x86_phys_bits = 36;
 #endif
 
-	if (c->extended_cpuid_level >= 0x80000007)
-		c->x86_power = cpuid_edx(0x80000007);
+	if (c->extended_cpuid_level >= 0x8000000a)
+		c->x86_capability[CPUID_8000_000A_EDX] = cpuid_edx(0x8000000a);
 
 	init_scattered_cpuid_features(c);
 }
@@ -820,7 +838,22 @@ static void __init early_identify_cpu(struct cpuinfo_x86 *c)
 	}
 
 	setup_force_cpu_cap(X86_FEATURE_ALWAYS);
+
+	if (c->x86_vendor != X86_VENDOR_AMD)
+		setup_force_cpu_bug(X86_BUG_CPU_MELTDOWN);
+
+	setup_force_cpu_bug(X86_BUG_SPECTRE_V1);
+	setup_force_cpu_bug(X86_BUG_SPECTRE_V2);
+
 	fpu__init_system(c);
+
+#ifdef CONFIG_X86_32
+	/*
+	 * Regardless of whether PCID is enumerated, the SDM says
+	 * that it can't be enabled in 32-bit mode.
+	 */
+	setup_clear_cpu_cap(X86_FEATURE_PCID);
+#endif
 }
 
 void __init early_cpu_init(void)
@@ -930,7 +963,7 @@ static void identify_cpu(struct cpuinfo_x86 *c)
 	int i;
 
 	c->loops_per_jiffy = loops_per_jiffy;
-	c->x86_cache_size = -1;
+	c->x86_cache_size = 0;
 	c->x86_vendor = X86_VENDOR_UNKNOWN;
 	c->x86_model = c->x86_mask = 0;	/* So far unknown... */
 	c->x86_vendor_id[0] = '\0'; /* Unset */
@@ -955,11 +988,8 @@ static void identify_cpu(struct cpuinfo_x86 *c)
 	if (this_cpu->c_identify)
 		this_cpu->c_identify(c);
 
-	/* Clear/Set all flags overriden by options, after probe */
-	for (i = 0; i < NCAPINTS; i++) {
-		c->x86_capability[i] &= ~cpu_caps_cleared[i];
-		c->x86_capability[i] |= cpu_caps_set[i];
-	}
+ 	/* Clear/Set all flags overridden by options, after probe */
+	apply_forced_caps(c);
 
 #ifdef CONFIG_X86_64
 	c->apicid = apic->phys_pkg_id(c->initial_apicid, 0);
@@ -1020,10 +1050,7 @@ static void identify_cpu(struct cpuinfo_x86 *c)
 	 * Clear/Set all flags overriden by options, need do it
 	 * before following smp all cpus cap AND.
 	 */
-	for (i = 0; i < NCAPINTS; i++) {
-		c->x86_capability[i] &= ~cpu_caps_cleared[i];
-		c->x86_capability[i] |= cpu_caps_set[i];
-	}
+	apply_forced_caps(c);
 
 	/*
 	 * On SMP, boot_cpu_data holds the common feature set between
@@ -1520,7 +1547,9 @@ void cpu_init(void)
 
 	printk(KERN_INFO "Initializing CPU#%d\n", cpu);
 
-	if (cpu_feature_enabled(X86_FEATURE_VME) || cpu_has_tsc || cpu_has_de)
+	if (cpu_feature_enabled(X86_FEATURE_VME) ||
+	    cpu_has_tsc ||
+	    boot_cpu_has(X86_FEATURE_DE))
 		cr4_clear_bits(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
 
 	load_current_idt();
@@ -1552,20 +1581,6 @@ void cpu_init(void)
 	fpu__init_cpu();
 }
 #endif
-
-#ifdef CONFIG_X86_DEBUG_STATIC_CPU_HAS
-void warn_pre_alternatives(void)
-{
-	WARN(1, "You're using static_cpu_has before alternatives have run!\n");
-}
-EXPORT_SYMBOL_GPL(warn_pre_alternatives);
-#endif
-
-inline bool __static_cpu_has_safe(u16 bit)
-{
-	return boot_cpu_has(bit);
-}
-EXPORT_SYMBOL_GPL(__static_cpu_has_safe);
 
 static void bsp_resume(void)
 {
