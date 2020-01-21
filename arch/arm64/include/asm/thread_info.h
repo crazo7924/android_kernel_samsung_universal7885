@@ -77,12 +77,12 @@ struct thread_info {
 /*
  * how to get the thread information struct from C
  */
-static inline struct thread_info *current_thread_info(void) __attribute_const__;
+static inline struct thread_info * current_thread_info(void) __attribute_const__;
 
 /*
  * struct thread_info can be accessed directly via sp_el0.
  */
-static inline struct thread_info *current_thread_info(void)
+static inline struct thread_info * current_thread_info(void)
 {
 	unsigned long sp_el0;
 

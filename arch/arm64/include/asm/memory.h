@@ -147,7 +147,7 @@ extern u64			kimage_voffset;
 
 static inline unsigned long kaslr_offset(void)
 {
-	return kimage_vaddr - KIMAGE_VADDR;
+	return kimage_vaddr - MODULES_END;
 }
 
 /*
